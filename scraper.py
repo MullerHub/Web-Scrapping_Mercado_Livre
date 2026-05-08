@@ -92,13 +92,16 @@ def extract_products(page, verbose: bool = False) -> list[Product]:
     except PlaywrightTimeoutError:
         pass
 
+    # Aguarda um pouco extra para o React renderizar
+    page.wait_for_timeout(2000)
+
     seen_urls: set[str] = set()
     products: list[Product] = []
     stable_rounds = 0
     previous_count = 0
-    max_iterations = 25  # Aumentado de 10 para capturar mais itens
-    scroll_distance = 5000  # Aumentado de 4000 para scroll mais agressivo
-    wait_time = 1500  # Aumentado de 1200 para dar mais tempo de carregamento
+    max_iterations = 30  # Aumentado para capturar mais itens
+    scroll_distance = 5000
+    wait_time = 1500
 
     for iteration in range(max_iterations):
         rows = page.evaluate(
@@ -133,8 +136,8 @@ def extract_products(page, verbose: bool = False) -> list[Product]:
             stable_rounds = 0
         previous_count = len(rows)
 
-        # Para após 4 rodadas sem novos itens (mais tolerante)
-        if stable_rounds >= 4:
+        # Para após 5 rodadas sem novos itens ou se já tem produtos suficientes
+        if stable_rounds >= 5 or (len(products) > 0 and len(rows) == 0):
             if verbose:
                 print(f"[Iteração {iteration + 1}] Nenhum novo item detectado. Encerrando busca.")
             break
@@ -152,15 +155,16 @@ def search_products(
     condition: str = "used",
     category_path: str | None = None,
     headed: bool = False,
-    click_filter: bool = False,
+    click_filter: bool = True,  # Alterado para True por padrão
     verbose: bool = False,
 ) -> tuple[str, list[Product]]:
-    # Se click_filter é True, navega para URL sem a condição no path e depois clica no filtro
+    # Sempre navega para URL sem a condição no path e clica no filtro
+    # Isso funciona melhor que ir direto pra URL com /usado/
     url = build_search_url(
         query,
         condition=condition,
         category_path=category_path,
-        apply_condition_in_path=not click_filter,
+        apply_condition_in_path=False,  # Sempre False para usar click_filter
     )
 
     with sync_playwright() as playwright:
@@ -173,10 +177,16 @@ def search_products(
                 "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
             },
         )
+        
+        if verbose:
+            print(f"[Debug] Navegando para: {url}")
+        
         page.goto(url, wait_until="domcontentloaded", timeout=30_000)
         
-        # Se click_filter é True, clica no filtro de condição
-        if click_filter:
+        # Clica no filtro de condição
+        if click_filter and condition == "used":
+            if verbose:
+                print("[Debug] Clicando no filtro 'USADOS'...")
             click_condition_filter(page, condition)
         
         products = extract_products(page, verbose=verbose)
@@ -195,7 +205,7 @@ def parse_args() -> argparse.Namespace:
         help="Caminho de categoria para reproduzir a navegação manual do site",
     )
     parser.add_argument("--headed", action="store_true", help="Abre o Chromium visível em vez de headless")
-    parser.add_argument("--click-filter", action="store_true", help="Navega para a URL base e clica no filtro de condição antes de extrair produtos")
+    parser.add_argument("--no-click-filter", action="store_true", help="Desativa o clique automático no filtro (navega direto para URL com /usado/)")
     parser.add_argument("--verbose", action="store_true", help="Mostra debug info durante o scroll e extração")
     parser.add_argument("--dry-run", action="store_true", help="Mostra a URL construída e não abre o navegador")
     parser.add_argument("--json", action="store_true", help="Imprime a saída em JSON")
