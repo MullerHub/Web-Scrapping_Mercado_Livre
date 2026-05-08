@@ -53,72 +53,119 @@ def first_text(elements: Iterable[str]) -> str:
     return ""
 
 
-def click_condition_filter(page, condition: str = "used") -> None:
+def click_condition_filter(page, condition: str = "used", verbose: bool = False) -> None:
     """Clica no filtro de condição (Novo/Usado) na página de busca."""
     condition_labels = {
-        "used": ["usados", "usado"],
-        "new": ["novo", "novos"],
+        "used": ["Usados", "usados", "usado"],
+        "new": ["Novo", "novo", "novos"],
     }
     
-    target_labels = condition_labels.get(condition, ["usados"])
+    target_labels = condition_labels.get(condition, ["Usados"])
     
-    # Procura por um elemento que contenha o texto do filtro (case-insensitive)
+    # Procura por um elemento que contenha o texto do filtro
     for label in target_labels:
         try:
-            # Tenta encontrar um checkbox ou label com o texto do filtro
-            filter_element = page.locator(f"label:has-text(/{label}/i)").first
+            # Usa filter com has_text que funciona melhor
+            filter_element = page.locator("label").filter(has_text=label).first
             if filter_element.is_visible(timeout=5000):
+                if verbose:
+                    print(f"[Debug] Encontrou label com '{label}'")
                 filter_element.click()
+                page.wait_for_timeout(3000)  # Aguarda mais tempo após clique
                 page.wait_for_load_state("networkidle", timeout=15_000)
+                page.wait_for_timeout(2000)  # Mais espera após network idle
+                if verbose:
+                    print(f"[Debug] Clique bem-sucedido no filtro '{label}'")
                 return
-        except (PlaywrightTimeoutError, Exception):
+        except (PlaywrightTimeoutError, Exception) as e:
+            if verbose:
+                print(f"[Debug] Label '{label}' não encontrado: {e}")
             continue
     
-    # Fallback: tenta encontrar via aria-label
+    # Fallback: tenta encontrar via role attribute
     try:
-        filter_element = page.locator(f"[aria-label*='{target_labels[0].capitalize()}']").first
+        filter_element = page.locator("input[role='checkbox'][aria-label*='Usados']").first
         if filter_element.is_visible(timeout=5000):
+            if verbose:
+                print(f"[Debug] Encontrou checkbox via aria-label")
             filter_element.click()
+            page.wait_for_timeout(3000)
             page.wait_for_load_state("networkidle", timeout=15_000)
+            page.wait_for_timeout(2000)
+            if verbose:
+                print(f"[Debug] Clique bem-sucedido no checkbox")
             return
-    except (PlaywrightTimeoutError, Exception):
-        pass
+    except (PlaywrightTimeoutError, Exception) as e:
+        if verbose:
+            print(f"[Debug] Fallback checkbox não funcionou: {e}")
+    
+    if verbose:
+        print("[Debug] Nenhum filtro encontrado! Continuando sem clicar...")
 
 
 def extract_products(page, verbose: bool = False) -> list[Product]:
-    page.wait_for_load_state("domcontentloaded")
     try:
-        page.wait_for_load_state("networkidle", timeout=10_000)
-    except PlaywrightTimeoutError:
-        pass
+        page.wait_for_load_state("domcontentloaded")
+        try:
+            page.wait_for_load_state("networkidle", timeout=15_000)
+        except PlaywrightTimeoutError:
+            pass
 
-    # Aguarda um pouco extra para o React renderizar
-    page.wait_for_timeout(2000)
+        # Aguarda um pouco extra para o React renderizar completamente
+        page.wait_for_timeout(4000)
+    except Exception as e:
+        if verbose:
+            print(f"[Debug] Erro durante espera inicial: {e}")
+        return []
+
+    # Debug: verifica quantos itens estão no DOM antes de começar
+    if verbose:
+        try:
+            item_count = page.evaluate("() => document.querySelectorAll('li.ui-search-layout__item').length")
+            scroll_height = page.evaluate("() => document.documentElement.scrollHeight")
+            print(f"[Debug] Itens no DOM: {item_count}, Altura da página: {scroll_height}")
+        except Exception as e:
+            print(f"[Debug] Erro ao inspecionar: {e}")
 
     seen_urls: set[str] = set()
     products: list[Product] = []
-    stable_rounds = 0
-    previous_count = 0
-    max_iterations = 30  # Aumentado para capturar mais itens
-    scroll_distance = 5000
-    wait_time = 1500
+    previous_scroll_height = 0
+    max_iterations = 100  # Aumentado muito
+    wait_time = 2500  # Mais tempo entre scrolls
 
     for iteration in range(max_iterations):
-        rows = page.evaluate(
-            """
-            () => Array.from(document.querySelectorAll('li.ui-search-layout__item'))
-              .map((item) => {
-                const titleNode = item.querySelector('a.poly-component__title, h3.poly-component__title-wrapper a, a[href*="produto.mercadolivre.com.br/MLB-"]');
-                const priceNode = item.querySelector('span.andes-money-amount__fraction');
-                const linkNode = item.querySelector('a[href*="produto.mercadolivre.com.br/MLB-"]');
-                const title = (titleNode?.textContent || titleNode?.getAttribute('aria-label') || '').trim();
-                const price = (priceNode?.textContent || '').trim();
-                const url = linkNode?.href || titleNode?.href || '';
-                return { title, price, url };
-              })
-              .filter((item) => item.title && item.price)
-            """
-        )
+        try:
+            # Scroll agressivo para o final
+            page.evaluate("() => window.scrollBy(0, 10000)")
+            page.wait_for_timeout(wait_time)
+        except Exception as e:
+            if verbose:
+                print(f"[Debug] Erro durante scroll: {e}")
+            break
+
+        try:
+            # Verifica altura atual da página
+            current_scroll_height = page.evaluate("() => document.documentElement.scrollHeight")
+            
+            rows = page.evaluate(
+                """
+                () => Array.from(document.querySelectorAll('li.ui-search-layout__item'))
+                  .map((item) => {
+                    const titleNode = item.querySelector('a.poly-component__title, h3.poly-component__title-wrapper a, a[href*="produto.mercadolivre.com.br/MLB-"]');
+                    const priceNode = item.querySelector('span.andes-money-amount__fraction');
+                    const linkNode = item.querySelector('a[href*="produto.mercadolivre.com.br/MLB-"]');
+                    const title = (titleNode?.textContent || titleNode?.getAttribute('aria-label') || '').trim();
+                    const price = (priceNode?.textContent || '').trim();
+                    const url = linkNode?.href || titleNode?.href || '';
+                    return { title, price, url };
+                  })
+                  .filter((item) => item.title && item.price)
+                """
+            )
+        except Exception as e:
+            if verbose:
+                print(f"[Debug] Erro durante evaluate: {e}")
+            break
 
         new_products_count = 0
         for row in rows:
@@ -127,24 +174,16 @@ def extract_products(page, verbose: bool = False) -> list[Product]:
                 products.append(Product(title=row["title"], price=row["price"], url=row["url"]))
                 new_products_count += 1
 
-        if verbose:
-            print(f"[Iteração {iteration + 1}] Itens no DOM: {len(rows)}, Novos produtos: {new_products_count}, Total: {len(products)}")
+        if verbose and (new_products_count > 0 or iteration % 10 == 0):
+            print(f"[Iteração {iteration + 1}] Produtos: {len(products)}, Novos: {new_products_count}, Altura: {current_scroll_height}")
 
-        if len(rows) == previous_count:
-            stable_rounds += 1
-        else:
-            stable_rounds = 0
-        previous_count = len(rows)
-
-        # Para após 5 rodadas sem novos itens ou se já tem produtos suficientes
-        if stable_rounds >= 5 or (len(products) > 0 and len(rows) == 0):
+        # Para quando a altura da página não muda mais (fim do conteúdo)
+        if current_scroll_height == previous_scroll_height:
             if verbose:
-                print(f"[Iteração {iteration + 1}] Nenhum novo item detectado. Encerrando busca.")
+                print(f"[Iteração {iteration + 1}] Fim do conteúdo. Total: {len(products)}")
             break
-
-        # Scroll para o final
-        page.mouse.wheel(0, scroll_distance)
-        page.wait_for_timeout(wait_time)
+        
+        previous_scroll_height = current_scroll_height
 
     return products
 
@@ -155,16 +194,16 @@ def search_products(
     condition: str = "used",
     category_path: str | None = None,
     headed: bool = False,
-    click_filter: bool = True,  # Alterado para True por padrão
+    click_filter: bool = False,  # Revertido para False (usa URL com /usado/)
     verbose: bool = False,
 ) -> tuple[str, list[Product]]:
-    # Sempre navega para URL sem a condição no path e clica no filtro
-    # Isso funciona melhor que ir direto pra URL com /usado/
+    # Por padrão, usa a URL com a condição no path (/usado/)
+    # Se click_filter é True, navega sem a condição e clica no filtro
     url = build_search_url(
         query,
         condition=condition,
         category_path=category_path,
-        apply_condition_in_path=False,  # Sempre False para usar click_filter
+        apply_condition_in_path=not click_filter,  # True quando click_filter é False
     )
 
     with sync_playwright() as playwright:
@@ -182,12 +221,13 @@ def search_products(
             print(f"[Debug] Navegando para: {url}")
         
         page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+        page.wait_for_timeout(2000)  # Espera inicial após carregamento
         
-        # Clica no filtro de condição
+        # Clica no filtro de condição se solicitado
         if click_filter and condition == "used":
             if verbose:
                 print("[Debug] Clicando no filtro 'USADOS'...")
-            click_condition_filter(page, condition)
+            click_condition_filter(page, condition, verbose=verbose)
         
         products = extract_products(page, verbose=verbose)
         browser.close()
@@ -205,7 +245,7 @@ def parse_args() -> argparse.Namespace:
         help="Caminho de categoria para reproduzir a navegação manual do site",
     )
     parser.add_argument("--headed", action="store_true", help="Abre o Chromium visível em vez de headless")
-    parser.add_argument("--no-click-filter", action="store_true", help="Desativa o clique automático no filtro (navega direto para URL com /usado/)")
+    parser.add_argument("--click-filter", action="store_true", help="Navega para a URL base e clica no filtro 'Usados'")
     parser.add_argument("--verbose", action="store_true", help="Mostra debug info durante o scroll e extração")
     parser.add_argument("--dry-run", action="store_true", help="Mostra a URL construída e não abre o navegador")
     parser.add_argument("--json", action="store_true", help="Imprime a saída em JSON")
@@ -214,11 +254,12 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    
     url = build_search_url(
         args.query,
         condition=args.condition,
         category_path=args.category_path,
-        apply_condition_in_path=not args.click_filter,
+        apply_condition_in_path=not args.click_filter,  # Usa /usado/ por padrão
     )
 
     if args.dry_run:
@@ -230,7 +271,7 @@ def main() -> None:
         condition=args.condition,
         category_path=args.category_path,
         headed=args.headed,
-        click_filter=args.click_filter,
+        click_filter=args.click_filter,  # False por padrão
         verbose=args.verbose,
     )
 
